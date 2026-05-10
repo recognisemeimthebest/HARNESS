@@ -1,4 +1,4 @@
-# =============================================================================
+﻿# =============================================================================
 # PostToolUse Hook — 자동 수정 기록 + Gemini 코드 리뷰 + 토론 모드
 #
 # 트리거:  Write / Edit / Bash 도구 실행 후 자동 실행
@@ -11,7 +11,10 @@
 # - Section 4 "프로젝트 특화 체크": 프로젝트에 맞게 추가
 # =============================================================================
 
-$GEMINI_MODEL = "gemini-3.1-pro"
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding            = [System.Text.Encoding]::UTF8
+
+$GEMINI_MODEL = "gemini-3.1-pro-preview"
 $MAX_CONTENT_LINES = 400
 $SHARED_DIR = ".claude/hooks/shared"
 $CHANGE_LOG = "$SHARED_DIR/change-log.md"
