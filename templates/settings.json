@@ -19,7 +19,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .claude/hooks/user-prompt-submit.sh",
+            "command": "powershell -NoProfile -ExecutionPolicy Bypass -File .claude/hooks/user-prompt-submit.ps1",
             "timeout": 10000,
             "statusMessage": "프롬프트 분석 중..."
           }
@@ -32,9 +32,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .claude/hooks/post-tool-use.sh",
-            "timeout": 5000,
-            "statusMessage": "코드 리뷰 체크 중..."
+            "command": "powershell -NoProfile -ExecutionPolicy Bypass -File .claude/hooks/post-tool-use.ps1",
+            "timeout": 120000,
+            "statusMessage": "Gemini 코드 리뷰 중..."
           }
         ]
       }
