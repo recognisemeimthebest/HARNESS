@@ -128,8 +128,8 @@ $CATEGORY_STR = if ($CATEGORIES.Count -gt 0) { $CATEGORIES -join ", " } else { "
 $WORD_COUNT  = ($USER_MSG -split '\s+' | Where-Object { $_ }).Count
 $MODULE_COUNT = 0
 
-$COMPLEXITY = if    ($WORD_COUNT -gt 50) { "복잡 (계획 수립 후 진행 권장)" }
-              elseif ($WORD_COUNT -gt 20) { "중간" }
+$COMPLEXITY = if    ($WORD_COUNT -gt 30) { "복잡 (계획 수립 후 진행 권장)" }
+              elseif ($WORD_COUNT -gt 12) { "중간" }
               else                        { "간단" }
 
 # =============================================================================
@@ -251,17 +251,74 @@ if ($RESUME) {
     Write-Output $RESUME
 }
 
-# 복잡한 작업 → 워크플로우 안내
-if ($COMPLEXITY -match '복잡|중간') {
+# =============================================================================
+# 9-A. 복잡도별 계획 강제
+# =============================================================================
+if ($COMPLEXITY -match '복잡') {
+    # current-task-plan.md 존재 여부 확인
+    $PLAN_FILE = "$SHARED_DIR/current-task-plan.md"
+    $planExists = Test-Path $PLAN_FILE
+
+    Write-Output ""
+    Write-Output "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    Write-Output "[계획 필수] 복잡한 작업이 감지되었습니다."
+    Write-Output "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    if (-not $planExists) {
+        Write-Output "⚠ 계획 파일 없음 — 파일 수정 전에 반드시:"
+        Write-Output "  1. 코드베이스를 먼저 탐색 (Read/Glob/Grep 사용)"
+        Write-Output "  2. ``$PLAN_FILE`` 에 작성:"
+        Write-Output "     - 접근 방식 및 이유"
+        Write-Output "     - 단계별 실행 계획"
+        Write-Output "     - 예상 영향 범위"
+        Write-Output "  3. ``$SHARED_DIR/checklist.md`` 에 체크리스트 항목 추가"
+        Write-Output "  4. 사용자 확인 후 순서대로 실행"
+    } else {
+        Write-Output "✓ 계획 파일 존재 — 계획대로 진행하세요."
+        Write-Output "  현재 계획: ``$PLAN_FILE``"
+        # 계획 파일 앞 5줄만 미리보기
+        $planPreview = Get-Content $PLAN_FILE -Encoding utf8 | Select-Object -First 5
+        $planPreview | ForEach-Object { Write-Output "  │ $_" }
+    }
+    Write-Output "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+} elseif ($COMPLEXITY -match '중간') {
     Write-Output ""
     Write-Output "[작업 워크플로우]"
-    Write-Output "1. 계획을 세우고 사용자에게 확인받으세요"
-    Write-Output "2. 기획서(``$SPEC_FILE``)를 참고하세요"
-    Write-Output "3. 작업 완료 후 맥락노트(``$SHARED_DIR/context-notes.md``)와 체크리스트(``$SHARED_DIR/checklist.md``) 업데이트"
-    Write-Output "4. 주요 작업은 평가 에이전트로 독립 검증하세요"
+    Write-Output "1. 기획서(``$SPEC_FILE``)를 참고하세요"
+    Write-Output "2. 작업 완료 후 맥락노트·체크리스트 업데이트"
+    Write-Output "3. 주요 작업은 평가 에이전트로 독립 검증하세요"
 }
 
+# =============================================================================
+# 9-B. 현재 체크리스트 진행 상황 (매 지시마다)
+# =============================================================================
+$CHECK_FILE = "$SHARED_DIR/checklist.md"
+if (Test-Path $CHECK_FILE) {
+    $allItems  = (Get-Content $CHECK_FILE -Encoding utf8 | Where-Object { $_ -match '^\- \[' }).Count
+    $doneItems = (Get-Content $CHECK_FILE -Encoding utf8 | Where-Object { $_ -match '^\- \[x\]' }).Count
+    $nextItem  = Get-Content $CHECK_FILE -Encoding utf8 | Where-Object { $_ -match '^\- \[ \]' } | Select-Object -First 1
+
+    if ($allItems -gt 0) {
+        Write-Output ""
+        Write-Output "[체크리스트] $doneItems / $allItems 완료"
+        if ($nextItem) {
+            Write-Output "  → 다음: $nextItem"
+        } else {
+            Write-Output "  → 모든 항목 완료!"
+        }
+    }
+}
+
+# =============================================================================
+# 9-C. 맥락 유지 리마인더
+# =============================================================================
 Write-Output ""
-Write-Output "[주의] 작업 단위 완료 시 맥락노트·체크리스트 업데이트 필수"
+Write-Output "[맥락 유지] 작업 완료 시 반드시:"
+Write-Output "  · context-notes.md — 결정사항과 이유 기록 (나중에 왜 이렇게 했는지 남기기)"
+Write-Output "  · checklist.md     — 완료 항목 [x] 체크, 새 항목 추가"
+if ($COMPLEXITY -match '복잡') {
+    Write-Output "  · current-task-plan.md — 계획 대비 실제 진행 차이 기록"
+}
 
 exit 0
