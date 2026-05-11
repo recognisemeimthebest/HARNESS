@@ -53,37 +53,61 @@ if ($SESSION_ID) {
         # --- 기획서 ---
         Write-Output "### [기획서] $SPEC_FILE"
         if (Test-Path $SPEC_FILE) {
-            Write-Output "프로젝트 기획서가 존재합니다. 전체 내용은 ``$SPEC_FILE``을 Read로 확인하세요."
+            Write-Output "프로젝트 기획서 존재 → 필요 시 Read로 확인하세요."
         } else {
             Write-Output "(기획서 파일 없음)"
         }
         Write-Output ""
 
-        # --- 맥락노트 ---
-        Write-Output "### [맥락노트] 이전 작업 결정사항 & 자료 위치"
+        # --- 맥락노트 (길면 Gemini 요약) ---
+        Write-Output "### [맥락노트] 이전 결정사항"
         $NOTES_FILE = "$SHARED_DIR/context-notes.md"
         if (Test-Path $NOTES_FILE) {
-            $notes = Get-Content $NOTES_FILE -Raw -Encoding utf8
-            # 실제 내용이 있을 때만 출력
-            $meaningful = $notes -replace '(?m)^\s*$','' -replace '(?m)^#.*$','' -replace '(?m)^>.*$','' -replace '아직 없음',''
-            if ($meaningful.Trim()) {
-                Write-Output $notes
-            } else {
+            $notesLines = Get-Content $NOTES_FILE -Encoding utf8
+            $meaningful = ($notesLines | Where-Object { $_ -notmatch '^\s*$|^#|^>' }) -join ""
+            if (-not $meaningful.Trim() -or $meaningful.Trim() -eq "아직 없음") {
                 Write-Output "(아직 기록된 결정사항 없음)"
+            } elseif ($notesLines.Count -gt 40) {
+                # 길면 Gemini가 요약
+                Write-Output "(맥락노트가 깁니다 — Gemini가 핵심만 압축합니다...)"
+                $summaryPrompt = @"
+다음은 프로젝트 맥락 노트입니다. Claude가 새 세션을 시작할 때 읽을 수 있도록 핵심만 압축 요약해줘.
+반드시 포함할 것:
+- 실패했던 접근 방식과 이유
+- 핵심 기술 결정사항
+- 현재 미해결 이슈
+
+절대 생략하면 안 되는 것: 실패 사례, 제약사항
+형식: 불릿 포인트로 간결하게 (최대 15줄)
+
+--- 맥락노트 원본 ---
+$($notesLines -join "`n")
+"@
+                $summary = $summaryPrompt | & gemini --model $GEMINI_MODEL -p $summaryPrompt 2>&1 |
+                           Where-Object { $_ -notmatch "Warning|Ripgrep|true color|GrepTool" }
+                if ($summary) {
+                    Write-Output "[Gemini 요약]"
+                    $summary | ForEach-Object { Write-Output "  $_" }
+                } else {
+                    # fallback: 마지막 30줄만
+                    Write-Output "[최근 30줄]"
+                    $notesLines | Select-Object -Last 30 | ForEach-Object { Write-Output "  $_" }
+                }
+            } else {
+                $notesLines | Write-Output
             }
         } else {
             Write-Output "(맥락노트 파일 없음)"
         }
         Write-Output ""
 
-        # --- 체크리스트 ---
+        # --- 체크리스트 (항상 원본 전체) ---
         Write-Output "### [체크리스트] 작업 진행 현황"
         $CHECK_FILE = "$SHARED_DIR/checklist.md"
         if (Test-Path $CHECK_FILE) {
             Get-Content $CHECK_FILE -Encoding utf8 | Write-Output
-
             Write-Output ""
-            Write-Output "### [다음 할 일] 미완료 항목 첫 번째:"
+            Write-Output "### [다음 할 일]"
             $nextTodo = Get-Content $CHECK_FILE -Encoding utf8 |
                         Where-Object { $_ -match '^\- \[ \]' } |
                         Select-Object -First 1
@@ -95,12 +119,22 @@ if ($SESSION_ID) {
         } else {
             Write-Output "(체크리스트 파일 없음)"
         }
-
         Write-Output ""
+
+        # --- change-log 롤링 윈도우 (최근 10개만) ---
+        $CHANGE_LOG_FILE = "$SHARED_DIR/change-log.md"
+        if (Test-Path $CHANGE_LOG_FILE) {
+            $logLines = Get-Content $CHANGE_LOG_FILE -Encoding utf8 |
+                        Where-Object { $_ -match '^\|' }  # 테이블 행만
+            if ($logLines.Count -gt 0) {
+                Write-Output "### [최근 수정 이력] (최근 10개)"
+                $logLines | Select-Object -Last 10 | ForEach-Object { Write-Output "  $_" }
+                Write-Output ""
+            }
+        }
+
         Write-Output "================================================================"
-        Write-Output "  BRIEFING COMPLETE"
-        Write-Output "  위 맥락을 참고하여 작업을 이어가세요."
-        Write-Output "  작업이 끝나면 반드시 체크리스트·맥락노트를 업데이트하세요."
+        Write-Output "  BRIEFING COMPLETE — 위 맥락을 참고하여 작업을 이어가세요."
         Write-Output "================================================================"
         Write-Output ""
     }
@@ -201,6 +235,16 @@ if ($MSG_LOWER -match '기획|계획|스펙|마일스톤|milestone|phase|일정|
 $RESUME = ""
 if ($MSG_LOWER -match '이어서|계속|어디까지|마저|하던|지난번|resume|continue') {
     $RESUME = "[RESUME] 이전 작업 이어하기 요청. 맥락노트(``$SHARED_DIR/context-notes.md``)와 체크리스트(``$SHARED_DIR/checklist.md``)를 먼저 확인하세요."
+}
+
+# =============================================================================
+# 8-B. 수동 Gemini 리뷰 요청 감지 → 마커 파일 생성
+# =============================================================================
+if ($MSG_LOWER -match 'gemini.*리뷰|리뷰.*gemini|gemini.*봐|코드.*리뷰해|리뷰해줘|gemini.*검토|검토.*gemini') {
+    $MANUAL_MARKER = "$SHARED_DIR/.gemini-review-requested"
+    New-Item -ItemType File -Path $MANUAL_MARKER -Force | Out-Null
+    Write-Output ""
+    Write-Output "[Gemini 리뷰 예약] 다음 파일 수정 시 Gemini 리뷰가 자동 실행됩니다."
 }
 
 # =============================================================================

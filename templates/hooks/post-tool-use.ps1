@@ -171,21 +171,57 @@ function Invoke-Gemini {
 }
 
 # =============================================================================
-# 6. Gemini 코드 리뷰
+# 6. Gemini 코드 리뷰 — 조건부 실행
 # =============================================================================
 $GEMINI_SECTION = ""
+$TRIGGER_GEMINI = $false
+$TRIGGER_REASONS = [System.Collections.Generic.List[string]]::new()
 
 if ($TOOL_NAME -in @("Write", "Edit")) {
 
-    # 너무 긴 파일은 앞부분만 전달
     $CODE_LINES  = $CONTENT -split "`n"
+    $LINE_COUNT  = $CODE_LINES.Count
     $CODE_SAMPLE = ($CODE_LINES | Select-Object -First $MAX_CONTENT_LINES) -join "`n"
-    $TRUNCATED   = if ($CODE_LINES.Count -gt $MAX_CONTENT_LINES) { " (상위 $MAX_CONTENT_LINES 줄)" } else { "" }
+    $TRUNCATED   = if ($LINE_COUNT -gt $MAX_CONTENT_LINES) { " (상위 $MAX_CONTENT_LINES 줄)" } else { "" }
 
-    # --- 1차 리뷰 (항상 실행) ---
-    $ROUND1_PROMPT = @"
+    # --- A) 정적 분석 이슈 감지 ---
+    if ($ISSUE_COUNT -gt 0) {
+        $TRIGGER_GEMINI = $true
+        $TRIGGER_REASONS.Add("정적 분석 이슈 ${ISSUE_COUNT}개")
+    }
+
+    # --- B) 수동 요청 마커 파일 ---
+    $MANUAL_MARKER = "$SHARED_DIR/.gemini-review-requested"
+    if (Test-Path $MANUAL_MARKER) {
+        $TRIGGER_GEMINI = $true
+        $TRIGGER_REASONS.Add("수동 리뷰 요청")
+        Remove-Item $MANUAL_MARKER -Force -ErrorAction SilentlyContinue
+    }
+
+    # --- C) 대용량 파일 (400줄 이상) ---
+    if ($LINE_COUNT -ge 400) {
+        $TRIGGER_GEMINI = $true
+        $TRIGGER_REASONS.Add("대용량 파일 (${LINE_COUNT}줄)")
+    }
+
+    # --- D) 민감 경로 ---
+    $SENSITIVE_KEYWORDS = @('auth', 'login', 'payment', 'billing', 'security', 'crypto', 'token', 'secret', 'permission', 'core', 'middleware')
+    foreach ($kw in $SENSITIVE_KEYWORDS) {
+        if ($FILE_PATH -imatch $kw) {
+            $TRIGGER_GEMINI = $true
+            $TRIGGER_REASONS.Add("민감 경로 ($kw)")
+            break
+        }
+    }
+
+    # --- Gemini 호출 ---
+    if ($TRIGGER_GEMINI) {
+        $REASON_STR = $TRIGGER_REASONS -join " | "
+
+        $ROUND1_PROMPT = @"
 [1차 코드 리뷰]
 파일: $FILE_PATH$TRUNCATED
+트리거 사유: $REASON_STR
 
 아래 코드를 리뷰해줘. 다음 항목을 확인해:
 1. 코드 품질 및 가독성
@@ -200,12 +236,12 @@ if ($TOOL_NAME -in @("Write", "Edit")) {
 $CODE_SAMPLE
 "@
 
-    $ROUND1 = Invoke-Gemini -Prompt $ROUND1_PROMPT
+        $ROUND1 = Invoke-Gemini -Prompt $ROUND1_PROMPT
 
-    # --- 토론 모드: 치명적 이슈 OR 이슈 3개 이상 ---
-    if ($HAS_CRITICAL -or $ISSUE_COUNT -ge 3) {
+        # --- 토론 모드: 치명적 이슈 OR 이슈 3개 이상 ---
+        if ($HAS_CRITICAL -or $ISSUE_COUNT -ge 3) {
 
-        $ROUND2_PROMPT = @"
+            $ROUND2_PROMPT = @"
 [2차 리뷰 — 토론 모드]
 파일: $FILE_PATH
 
@@ -224,13 +260,12 @@ $ROUND1
 [반론 수용] 1차 리뷰에서 제외한 항목과 이유
 "@
 
-        $ROUND2 = Invoke-Gemini -Prompt $ROUND2_PROMPT
+            $ROUND2 = Invoke-Gemini -Prompt $ROUND2_PROMPT
 
-        $GEMINI_SECTION = @"
+            $GEMINI_SECTION = @"
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-[Gemini 3.1 Pro — 토론 모드 활성화]
-치명적 이슈 또는 이슈 $ISSUE_COUNT 개 감지
+[Gemini 3.1 Pro — 토론 모드] $REASON_STR
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 [1차 리뷰]
@@ -245,16 +280,17 @@ $ROUND2
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 "@
 
-    } else {
+        } else {
 
-        $GEMINI_SECTION = @"
+            $GEMINI_SECTION = @"
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-[Gemini 3.1 Pro — 코드 리뷰]
+[Gemini 3.1 Pro — 코드 리뷰] $REASON_STR
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 $ROUND1
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 "@
+        }
     }
 }
 
