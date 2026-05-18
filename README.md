@@ -62,13 +62,38 @@ Claude Code는 강력하지만, 그냥 쓰면 이런 문제가 생긴다:
 
 ## 사용법
 
+### A. 자동 설치 (Linux / macOS)
+
+새 프로젝트 디렉토리에서 한 줄:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/recognisemeimthebest/HARNESS/main/install.sh)
+```
+
+또는 레포를 클론한 뒤 `./install.sh <대상_디렉토리>`. `install.sh`는 `.claude/` 디렉토리를 만들고 `settings.json`, sh 훅, 스킬 챕터, 에이전트 템플릿, 3대 문서의 빈 골격을 복사한다.
+
+### B. 자동 설치 (Windows)
+
+`templates/settings.windows.json`을 `.claude/settings.json`으로, `templates/hooks/*.ps1`을 `.claude/hooks/`로 복사한다. PowerShell 훅이 PowerShell 5+에서 동작한다.
+
+### C. 수동 / Claude Code에게 시키기
+
 1. `docs/ORCHESTRATION_SETUP_GUIDE.md`를 읽는다
 2. `templates/` 안의 파일들을 프로젝트의 `.claude/`에 복사한다
 3. 프로젝트에 맞게 스킬 챕터와 에이전트를 커스터마이징한다
 
-**또는** 그냥 Claude Code한테 이렇게 말한다:
+**또는** Claude Code한테 이렇게 말한다:
 
 > "이 가이드 보고 우리 프로젝트에 맞게 오케스트레이션 세팅해줘"
+
+### 플랫폼 대응
+
+| 운영체제 | settings.json | 훅 |
+|---------|--------------|-----|
+| Linux/macOS | `templates/settings.json` (sh 호출) | `templates/hooks/*.sh` (실행권한 필요) |
+| Windows | `templates/settings.windows.json` (powershell 호출) | `templates/hooks/*.ps1` |
+
+기능은 양쪽 동일하다 (정적 분석, Gemini 1차/2차 토론 리뷰, 모호성 감지, 계획 강제, 체크리스트 진행률, 자동 변경 기록).
 
 ## 전체 흐름
 
