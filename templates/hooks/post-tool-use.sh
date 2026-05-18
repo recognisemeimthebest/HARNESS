@@ -1,23 +1,27 @@
 #!/usr/bin/env bash
 # =============================================================================
-# PostToolUse Hook — 자동 수정 기록 + Gemini 코드 리뷰 + 토론 모드 (Linux/macOS)
+# PostToolUse Hook — 자동 수정 기록 + Codex 사후 리뷰 (Linux/macOS)
 #
 # 트리거:  Write / Edit / Bash 도구 실행 후 자동 실행
 # 1) 모든 Write/Edit → change-log.md 자동 기록
 # 2) 정적 분석: 위험 작업/하드코딩/보안/Python 에러처리/Bash 위험명령
-# 3) Gemini 1차 리뷰 (이슈 / 수동 마커 / 대용량 / 민감 경로 → 트리거)
-# 4) Gemini 2차 토론 (치명적 이슈 OR 이슈 3개+) → 반론 검토 후 최종 권고
+# 3) 외부 리뷰어 1차 리뷰 (이슈 / 수동 마커 / 대용량 / 민감 경로 → 트리거)
+#    - 기본 REVIEWER=codex. 환경변수로 gemini/none 으로 전환 가능
+#    - Codex가 1라운드 리뷰 → 메인 Claude가 그것을 보고 종합 판단
 #
 # [커스터마이징]
-# - GEMINI_MODEL: 사용할 Gemini 모델명 (env로 오버라이드 가능)
-# - MAX_CONTENT_LINES: Gemini에 전달할 최대 줄 수
+# - REVIEWER: codex | gemini | none (기본 codex)
+# - CODEX_MODEL / GEMINI_MODEL: 모델명 오버라이드
+# - MAX_CONTENT_LINES: 리뷰어에 전달할 최대 줄 수
 # - SENSITIVE_KEYWORDS: 민감 파일 경로 키워드
 # - §4 "프로젝트 특화 체크": 프로젝트에 맞게 추가
 # =============================================================================
 
 set -uo pipefail
 
-GEMINI_MODEL="${GEMINI_MODEL:-gemini-3.1-pro-preview}"
+CODEX_MODEL="${CODEX_MODEL:-}"        # 비우면 codex 기본 모델
+GEMINI_MODEL="${GEMINI_MODEL:-gemini-3.1-pro-preview}"  # 폴백용
+REVIEWER="${REVIEWER:-codex}"          # codex | gemini | none
 MAX_CONTENT_LINES=400
 SHARED_DIR=".claude/hooks/shared"
 CHANGE_LOG="$SHARED_DIR/change-log.md"
@@ -167,28 +171,60 @@ if [ "$TOOL_NAME" = "Bash" ]; then
 fi
 
 # =============================================================================
-# Gemini CLI 호출 함수
+# 리뷰어 호출 함수 (Codex 우선, Gemini 폴백)
 # =============================================================================
-_invoke_gemini() {
+_invoke_codex() {
     # $1: prompt
-    if ! command -v gemini >/dev/null 2>&1; then
-        printf '[Gemini CLI 미설치 — 리뷰 생략]'
+    if ! command -v codex >/dev/null 2>&1; then
+        printf '[Codex CLI 미설치]'
         return 1
     fi
     local prompt="$1"
-    local tmp
-    tmp=$(mktemp 2>/dev/null) || tmp="/tmp/claude_gemini_$$.txt"
-    printf '%s' "$prompt" > "$tmp"
     local result
-    # gemini -p는 prompt 인자를 받고, stdin도 추가 입력으로 받음
-    result=$(gemini --model "$GEMINI_MODEL" -p "$(cat "$tmp")" 2>&1)
+    # read-only sandbox(기본), stdin 닫기, git 체크 스킵
+    if [ -n "$CODEX_MODEL" ]; then
+        result=$(codex exec --model "$CODEX_MODEL" --skip-git-repo-check "$prompt" </dev/null 2>&1)
+    else
+        result=$(codex exec --skip-git-repo-check "$prompt" </dev/null 2>&1)
+    fi
     local rc=$?
-    rm -f "$tmp"
+    if [ $rc -ne 0 ] || [ -z "$result" ]; then
+        printf '[Codex 호출 실패 (exit %d)]' "$rc"
+        return 1
+    fi
+    # codex exec는 stderr에 헤더(workdir/model/...) + stdout에 본문을 섞어 출력함.
+    # 헤더 라인 제거 (대략 8줄 이내) — "--------" 구분선 이후를 본문으로 간주
+    printf '%s' "$result" | awk '
+        BEGIN { body=0 }
+        /^--------$/ { body=1; next }
+        body { print }
+    ' | sed '/^$/N;/^\n$/D'
+}
+
+_invoke_gemini() {
+    if ! command -v gemini >/dev/null 2>&1; then
+        printf '[Gemini CLI 미설치]'
+        return 1
+    fi
+    local prompt="$1"
+    local result
+    result=$(gemini --model "$GEMINI_MODEL" -p "$prompt" 2>&1)
+    local rc=$?
     if [ $rc -ne 0 ] || [ -z "$result" ]; then
         printf '[Gemini 호출 실패]'
         return 1
     fi
     printf '%s' "$result"
+}
+
+_invoke_reviewer() {
+    # $1: prompt — REVIEWER 환경변수 기준으로 분기
+    case "$REVIEWER" in
+        codex)  _invoke_codex "$1" ;;
+        gemini) _invoke_gemini "$1" ;;
+        none)   printf '[REVIEWER=none — 자동 리뷰 비활성]'; return 1 ;;
+        *)      _invoke_codex "$1" || _invoke_gemini "$1" ;;
+    esac
 }
 
 # =============================================================================
@@ -216,11 +252,12 @@ if [ "$TOOL_NAME" = "Write" ] || [ "$TOOL_NAME" = "Edit" ]; then
     fi
 
     # --- B) 수동 요청 마커 ---
-    MANUAL_MARKER="$SHARED_DIR/.gemini-review-requested"
-    if [ -f "$MANUAL_MARKER" ]; then
+    MANUAL_MARKER="$SHARED_DIR/.review-requested"
+    MANUAL_MARKER_LEGACY="$SHARED_DIR/.gemini-review-requested"
+    if [ -f "$MANUAL_MARKER" ] || [ -f "$MANUAL_MARKER_LEGACY" ]; then
         TRIGGER_GEMINI=1
         TRIGGER_REASONS+="수동 리뷰 요청 | "
-        rm -f "$MANUAL_MARKER"
+        rm -f "$MANUAL_MARKER" "$MANUAL_MARKER_LEGACY"
     fi
 
     # --- C) 대용량 파일 ---
@@ -240,79 +277,45 @@ if [ "$TOOL_NAME" = "Write" ] || [ "$TOOL_NAME" = "Edit" ]; then
 
     REASON_STR="${TRIGGER_REASONS% | }"
 
-    # --- Gemini 호출 ---
+    # --- 외부 리뷰어 호출 (Codex 우선, Gemini 폴백) ---
     if [ "$TRIGGER_GEMINI" -eq 1 ]; then
-        ROUND1_PROMPT=$(cat <<EOF
-[1차 코드 리뷰]
-파일: ${FILE_PATH}${TRUNCATED}
-트리거 사유: ${REASON_STR}
+        REVIEW_PROMPT=$(cat <<EOF
+You are a code reviewer working alongside Claude (the main agent). Claude just wrote/edited the file below and will read your review and then give the user a synthesized verdict.
 
-아래 코드를 리뷰해줘. 다음 항목을 확인해:
-1. 코드 품질 및 가독성
-2. 보안 취약점 (XSS, SQL 인젝션, 하드코딩 자격증명 등)
-3. 에러 처리 누락
-4. 성능 이슈
-5. 베스트 프랙티스 위반
+File: ${FILE_PATH}${TRUNCATED}
+Trigger: ${REASON_STR}
 
-심각도를 [CRITICAL] [WARNING] [INFO] 로 표시하고, 각 이슈마다 구체적인 수정 방향을 제시해줘.
+Review the code. Check:
+1. Quality and readability
+2. Security (XSS, SQL injection, hardcoded credentials, path traversal, etc.)
+3. Missing error handling / unchecked failure modes
+4. Performance issues
+5. Project / language best practices
 
---- 코드 ---
+For each issue, mark severity [CRITICAL] / [WARNING] / [INFO] and give a concrete fix direction.
+Be concise — Claude will paraphrase, not quote you. Skip generic advice; focus on what is wrong in THIS code.
+If the code looks fine, say so briefly.
+
+--- code ---
 ${CODE_SAMPLE}
 EOF
 )
-        ROUND1=$(_invoke_gemini "$ROUND1_PROMPT")
+        REVIEW_OUTPUT=$(_invoke_reviewer "$REVIEW_PROMPT")
 
-        if [ "$HAS_CRITICAL" -eq 1 ] || [ "$ISSUE_COUNT" -ge 3 ]; then
-            ROUND2_PROMPT=$(cat <<EOF
-[2차 리뷰 — 토론 모드]
-파일: ${FILE_PATH}
-
-너의 1차 리뷰 결과:
-${ROUND1}
-
-이제 시니어 개발자(Claude)가 제기할 수 있는 반론을 스스로 검토해봐:
-- "이 부분은 의도적인 설계다"
-- "이 케이스는 외부에서 이미 처리된다"
-- "컨텍스트상 실제 위험이 낮다"
-
-반론을 검토한 뒤, 정말로 수정이 필요한 이슈만 추려서 최종 권고안을 정리해줘.
-형식:
-[최종 필수 수정] 반드시 고쳐야 할 항목
-[최종 권장 수정] 시간이 되면 개선할 항목
-[반론 수용] 1차 리뷰에서 제외한 항목과 이유
-EOF
-)
-            ROUND2=$(_invoke_gemini "$ROUND2_PROMPT")
-
-            GEMINI_SECTION=$(cat <<EOF
+        GEMINI_SECTION=$(cat <<EOF
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-[Gemini — 토론 모드] ${REASON_STR}
+[${REVIEWER} 사후 리뷰] ${REASON_STR}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-[1차 리뷰]
-${ROUND1}
-
-[2차 리뷰 — 반론 검토 후 최종 권고]
-${ROUND2}
-
+${REVIEW_OUTPUT}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-→ [필수 수정] 항목부터 적용하세요.
-→ 수정 완료 후 저장하면 Gemini가 재검증합니다.
+→ [Claude 종합 판단] 위 리뷰를 본인의 시각과 합쳐 사용자에게 보고하세요:
+   1. 진짜로 고쳐야 하는 이슈만 추려서 우선순위 매기기
+   2. 의도적 설계/이미 처리됨 등 반론이 있으면 명시
+   3. Codex 의견을 그대로 옮기지 말고 본인 판단으로 종합
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 EOF
 )
-        else
-            GEMINI_SECTION=$(cat <<EOF
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-[Gemini — 코드 리뷰] ${REASON_STR}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-${ROUND1}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-EOF
-)
-        fi
     fi
 fi
 
@@ -327,7 +330,7 @@ if [ -n "$REMINDERS" ]; then
 fi
 
 if [ "$HAS_CRITICAL" -eq 1 ] || [ "$ISSUE_COUNT" -ge 3 ]; then
-    ALL_CONTEXT+=$'\n'"[토론 모드] 치명적 이슈 또는 이슈 ${ISSUE_COUNT}개 — Gemini 2라운드 토론 진행됨"$'\n'
+    ALL_CONTEXT+=$'\n'"[심각도 높음] 치명적 이슈 또는 이슈 ${ISSUE_COUNT}개 — Codex 리뷰까지 본 후 즉시 수정·재검토 권장"$'\n'
 elif [ "$ISSUE_COUNT" -gt 0 ]; then
     ALL_CONTEXT+=$'\n'"[경미한 이슈] ${ISSUE_COUNT}개 — 위 항목을 바로 수정하세요"$'\n'
 fi

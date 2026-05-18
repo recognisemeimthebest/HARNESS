@@ -33,8 +33,8 @@
           {
             "type": "command",
             "command": "bash .claude/hooks/post-tool-use.sh",
-            "timeout": 120000,
-            "statusMessage": "Gemini 코드 리뷰 중..."
+            "timeout": 180000,
+            "statusMessage": "Codex 사후 리뷰 중..."
           }
         ]
       }

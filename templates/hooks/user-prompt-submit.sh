@@ -302,13 +302,45 @@ if _match '이어서|계속|어디까지|마저|하던|지난번|resume|continue
 fi
 
 # =============================================================================
-# 8-B. 수동 Gemini 리뷰 요청 감지 → 마커 파일 생성
+# 8-B. 수동 리뷰 요청 감지 → 마커 파일 생성 (Codex 우선, Gemini fallback)
 # =============================================================================
-if _match 'gemini.*리뷰|리뷰.*gemini|gemini.*봐|코드.*리뷰해|리뷰해줘|gemini.*검토|검토.*gemini'; then
+if _match 'codex.*리뷰|리뷰.*codex|gemini.*리뷰|리뷰.*gemini|코드.*리뷰해|리뷰해줘|검토.*해줘'; then
     mkdir -p "$SHARED_DIR"
-    touch "$SHARED_DIR/.gemini-review-requested"
+    touch "$SHARED_DIR/.review-requested"
     echo ""
-    echo "[Gemini 리뷰 예약] 다음 파일 수정 시 Gemini 리뷰가 자동 실행됩니다."
+    echo "[리뷰 예약] 다음 파일 수정 시 Codex 사후 리뷰가 자동 실행됩니다."
+fi
+
+# =============================================================================
+# 8-C. Codex 사전 위임 트리거 — 코드 생성 + 일정 분량 이상 시 강한 신호
+# =============================================================================
+CODEX_DELEGATE=0
+CODEX_DELEGATE_REASON=""
+
+# 코드 생성/구현 카테고리 + 단어 수 / 복잡도 기반
+if echo "$CATEGORY_STR" | grep -q "코드생성" && [ "$WORD_COUNT" -ge 12 ]; then
+    CODEX_DELEGATE=1
+    CODEX_DELEGATE_REASON="코드 생성 작업 + 단어 ${WORD_COUNT}개 (분량이 늘어날 가능성)"
+fi
+
+# 사용자가 명시적으로 "Codex와 같이/둘 다/병렬" 같은 표현 사용
+if _match 'codex.*같이|같이.*codex|둘 다.*짜|병렬.*짜|코덱스.*같이|같이.*코덱스|second opinion|다른 시각'; then
+    CODEX_DELEGATE=1
+    CODEX_DELEGATE_REASON="사용자 명시 협업 요청"
+fi
+
+# 새 파일/모듈/서비스 생성 키워드
+if _match '새.*파일|새.*모듈|새.*서비스|새.*함수|처음부터|from scratch|새로.*짜|새로.*만들'; then
+    if echo "$CATEGORY_STR" | grep -q "코드생성"; then
+        CODEX_DELEGATE=1
+        CODEX_DELEGATE_REASON="신규 코드 생성 (큰 분량 가능성 높음)"
+    fi
+fi
+
+# 사용자가 명시적으로 거부한 경우 무효화
+if _match '직접.*짜|간단.*하나|짧게.*하나|작은.*수정|한 줄|딱.*하나|claude만|클로드만'; then
+    CODEX_DELEGATE=0
+    CODEX_DELEGATE_REASON=""
 fi
 
 # =============================================================================
@@ -440,5 +472,33 @@ echo "[Claude 행동 원칙]"
 echo "  · 지시가 모호하면 → 추측해서 진행하지 말고 먼저 질문하세요"
 echo "  · 사용자 전제가 틀렸으면 → 작업 전에 먼저 설명하고 확인을 받으세요"
 echo "  · 더 나은 방법이 있으면 → 제안하고 선택권을 주세요"
+
+# =============================================================================
+# 9-E. Codex 자동 협업 원칙 (코드 생성 시 자동 위임)
+# =============================================================================
+echo ""
+echo "[Codex 자동 협업 원칙]"
+echo "  · 코드를 새로 짜야 하고 분량이 50줄 이상 예상되거나 신규 파일/모듈 생성이면"
+echo "    → 즉시 codex 서브에이전트(subagent_type: codex)에 초안을 위임"
+echo "    → Codex 응답을 받으면: (1) 요구사항 충족 확인 (2) 보안/에러처리 검수"
+echo "       (3) 프로젝트 컨벤션 정렬 (4) 본인이 추가 수정·통합 후 최종 작성"
+echo "  · 작은 수정(한 줄, 이름 바꾸기, 디버그/print 추가)은 Codex 호출 없이 직접"
+echo "  · 사용자가 '직접 짜', '간단히' 등을 명시하면 위임하지 말 것"
+echo "  · 사후 리뷰: 파일 작성 후 Codex 1차 리뷰가 자동 실행됨. Codex 의견을 본 뒤"
+echo "    본인 시각을 더해 종합 판단을 사용자에게 보고하세요 (Codex 말 그대로 옮기지 X)"
+
+# Codex 사전 위임 트리거 발동 시 강한 신호
+if [ "$CODEX_DELEGATE" -eq 1 ]; then
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "▶ [Codex 사전 위임 발동] $CODEX_DELEGATE_REASON"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "이번 작업은 Codex와 협업이 권장됩니다."
+    echo "1) 메인 Claude가 요구사항을 1-2문장으로 정리"
+    echo "2) codex 서브에이전트 호출 (Agent 툴, subagent_type: codex)"
+    echo "3) Codex 초안 회수 → 검수·수정 → 최종 파일 작성"
+    echo "사용자가 '직접 짜'를 명시한 경우엔 이 안내를 무시하세요."
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+fi
 
 exit 0
